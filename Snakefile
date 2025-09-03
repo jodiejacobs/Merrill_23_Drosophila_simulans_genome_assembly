@@ -1,8 +1,8 @@
 #Completed on 08/28/2025
 #to run this script:
-#cd /private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_wRi_merrill_23_assembly/
+#cd /private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_Dsim_assembly/
 #conda activate snakemake
-# snakemake --executor slurm --default-resources slurm_partition=medium runtime=720 mem_mb=1000000 -j 10 -s Snakefile
+# snakemake --executor slurm --default-resources slurm_partition=medium runtime=720 mem_mb=100000 -j 10 -s Snakefile
 
 #Global Variables:
 
@@ -14,7 +14,9 @@ conda: '/private/groups/russelllab/jodie/bootcamp2024/scripts/read_filtering.yam
 
 rule all:
     input:
-        expand('data/polished/{sample}_wRi_M23.assembly.fasta', sample=samples)
+        expand('data/integrated/{sample}_Dsim_integrated.assembly.fasta', sample=samples),
+        expand('data/comparison/{sample}_stats_summary.txt', sample=samples),
+        expand('data/comparison/{sample}_vs_ref_dnadiff.txt', sample=samples)
 
 # ==============================================================================
 # SHARED PREPROCESSING STEPS
@@ -22,7 +24,7 @@ rule all:
 
 rule basecalling:
     input:
-        pod5 = 'data/pod5/'
+        pod5 = '/private/groups/russelllab/jodie/sequencing_data/Dsim_wRi_merrill23/pod5'
     output:
         bam = 'data/aligned/aligned_basecalled.bam'
     params:
@@ -33,7 +35,7 @@ rule basecalling:
         slurm_partition='gpu',
         mem_mb=100000,  # 100GB in MB
         runtime=360,    # 6 hours in minutes
-        slurm_extra='--gpus-per-node=4 --nodes=1 --exclude=phoenix-09 --mail-user=jomojaco@ucsc.edu --mail-type=ALL --output=logs/%x.%j.log'
+        slurm_extra='--gpus-per-node=4'
     shell:
         """
         # Dorado Basecalling:
@@ -77,59 +79,235 @@ rule separate_bam:
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
         conda activate assembly
 
-        samtools view -@ {threads} -b -f 4 {input.bam} > {output.wolbachia_bam}
         samtools view -@ {threads} -b -F 4 {input.bam} > {output.host_bam}
+        samtools view -@ {threads} -b -f 4 {input.bam} > {output.wolbachia_bam}
         '''
 
 # ==============================================================================
-# WRI (WOLBACHIA) PROCESSING  
+# D. SIMULANS HOST GENOME PROCESSING  
 # ==============================================================================
 
-rule wri_bam2fastq:
+rule host_bam2fastq:
     input:
-        wolbachia_bam = 'data/aligned/{sample}.wRiM23.bam'
+        host_bam = 'data/aligned/{sample}.DsimM23.bam'
     output:
-        wolbachia_fastq = 'data/basecalled/{sample}.wRiM23.fastq.gz'
+        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
     resources: 
-        mem_mb=25000,
-        runtime=60
+        mem_mb=50000,
+        runtime=120
     threads: 8  
     shell:
         '''
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
         conda activate assembly
-        samtools bam2fq -@ {threads} {input.wolbachia_bam} | seqkit seq -m 3000 | gzip > {output.wolbachia_fastq}
+        samtools bam2fq -@ {threads} {input.host_bam} | seqkit seq -m 1000 | gzip > {output.host_fastq}
         '''
 
-rule wri_assembly:
+rule host_flye_assembly:
     input:
-        wolbachia_fastq = 'data/basecalled/{sample}.wRiM23.fastq.gz'
+        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
     output:
-        wolbachia_assembly = 'data/flye/{sample}/wRi/assembly.fasta'
+        host_assembly = 'data/flye/{sample}/Dsim/assembly.fasta'
     params:
-        wolbachia_dir = 'data/flye/{sample}/wRi/'
+        host_dir = 'data/flye/{sample}/Dsim/'
     resources: 
-        mem_mb=50000,
-        runtime=180  # Shorter runtime for smaller genome
-    threads: 16  
+        mem_mb=200000,  # 200GB for large genome
+        runtime=1440    # 24 hours for D. simulans assembly
+    threads: 24  
     shell:
         ''' 
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
         conda activate assembly
-        mkdir -p {params.wolbachia_dir}
-        flye --nano-hq {input.wolbachia_fastq} -t {threads} --out-dir {params.wolbachia_dir} --genome-size 1.3m
+        mkdir -p {params.host_dir}
+        flye --nano-hq {input.host_fastq} -t {threads} --out-dir {params.host_dir} --genome-size 140m
         '''
 
-rule wri_prepare_short_reads:
+rule reference_based_polish:
     input:
-        wri_r1 = 'data/short_reads/wRi_R1.fastq.gz',
-        wri_r2 = 'data/short_reads/wRi_R2.fastq.gz'
+        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
     output:
-        wri_trimmed = 'data/short_reads/{sample}.wri.trimmed.filtered.fastq.gz'
+        ref_polished = 'data/polished/{sample}_Dsim_ref_polished.fasta'
+    params:
+        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz',
+        work_dir = 'data/polished/{sample}/ref_polish/'
+    resources: 
+        mem_mb=150000,
+        runtime=720  # 12 hours
+    threads: 20
+    shell:
+        '''
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        mkdir -p {params.work_dir}
+        
+        # Decompress reference if needed
+        if [[ {params.reference} == *.gz ]]; then
+            gunzip -c {params.reference} > {params.work_dir}/reference.fasta
+        else
+            cp {params.reference} {params.work_dir}/reference.fasta
+        fi
+        
+        # Map nanopore reads to reference
+        minimap2 -ax map-ont -t {threads} {params.work_dir}/reference.fasta {input.host_fastq} | \
+            samtools sort -@ {threads} > {params.work_dir}/mapped.bam
+        samtools index {params.work_dir}/mapped.bam
+        
+        # Polish with Medaka
+        medaka consensus {params.work_dir}/mapped.bam {output.ref_polished} \
+            --model r1041_e82_400bps_hac_v4.3.0 --threads {threads}
+        '''
+
+rule host_medaka_polish:
+    input:
+        host_assembly = 'data/flye/{sample}/Dsim/assembly.fasta',
+        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
+    output:
+        host_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta'
+    params:
+        work_dir = 'data/polished/{sample}/flye_polish/'
+    resources: 
+        mem_mb=150000,
+        runtime=720  # 12 hours
+    threads: 20
+    shell:
+        '''
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        mkdir -p {params.work_dir}
+        
+        # Map reads to assembly
+        minimap2 -ax map-ont -t {threads} {input.host_assembly} {input.host_fastq} | \
+            samtools sort -@ {threads} > {params.work_dir}/mapped.bam
+        samtools index {params.work_dir}/mapped.bam
+        
+        # Polish with Medaka  
+        medaka consensus {params.work_dir}/mapped.bam {output.host_polished} \
+            --model r1041_e82_400bps_hac_v4.3.0 --threads {threads}
+        '''
+
+rule integrate_assemblies:
+    input:
+        flye_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta',
+        ref_polished = 'data/polished/{sample}_Dsim_ref_polished.fasta'
+    output:
+        integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta'
+    params:
+        work_dir = 'data/integrated/{sample}/'
+    resources: 
+        mem_mb=100000,
+        runtime=360  # 6 hours
+    threads: 16
+    shell:
+        '''
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        mkdir -p {params.work_dir}
+        
+        # Use Quickmerge to integrate assemblies
+        # Reference-polished as "reference", Flye as "query" 
+        quickmerge -d {input.ref_polished} -q {input.flye_polished} \
+            -hco 5.0 -c 1.5 -l 100000 -ml 5000 \
+            -pre {params.work_dir}/integrated
+            
+        # Copy final assembly
+        cp {params.work_dir}/integrated.fasta {output.integrated}
+        '''
+
+# ==============================================================================
+# QUALITY ASSESSMENT
+# ==============================================================================
+
+rule assembly_stats:
+    input:
+        flye_assembly = 'data/flye/{sample}/Dsim/assembly.fasta',
+        flye_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta',
+        ref_polished = 'data/polished/{sample}_Dsim_ref_polished.fasta',
+        integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta'
+    output:
+        stats = 'data/comparison/{sample}_stats_summary.txt'
+    resources: 
+        mem_mb=25000,
+        runtime=60
     threads: 4
+    shell:
+        '''
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        echo "Assembly Statistics Comparison" > {output.stats}
+        echo "===============================" >> {output.stats}
+        echo "" >> {output.stats}
+        
+        echo "Flye De Novo Assembly:" >> {output.stats}
+        assembly-stats {input.flye_assembly} >> {output.stats}
+        echo "" >> {output.stats}
+        
+        echo "Flye Polished Assembly:" >> {output.stats}
+        assembly-stats {input.flye_polished} >> {output.stats}
+        echo "" >> {output.stats}
+        
+        echo "Reference Polished Assembly:" >> {output.stats}
+        assembly-stats {input.ref_polished} >> {output.stats}
+        echo "" >> {output.stats}
+        
+        echo "Integrated Assembly:" >> {output.stats}
+        assembly-stats {input.integrated} >> {output.stats}
+        '''
+
+rule busco_assessment:
+    input:
+        flye_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta',
+        ref_polished = 'data/polished/{sample}_Dsim_ref_polished.fasta',
+        integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta'
+    output:
+        flye_busco = 'busco/{sample}/flye_polished/short_summary.specific.diptera_odb10.txt',
+        ref_busco = 'busco/{sample}/ref_polished/short_summary.specific.diptera_odb10.txt', 
+        integrated_busco = 'busco/{sample}/integrated/short_summary.specific.diptera_odb10.txt'
+    params:
+        flye_dir = 'busco/{sample}/flye_polished/',
+        ref_dir = 'busco/{sample}/ref_polished/',
+        integrated_dir = 'busco/{sample}/integrated/'
+    resources: 
+        mem_mb=50000,
+        runtime=300  # 5 hours for larger genome
+    threads: 16  
+    shell:
+        ''' 
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate busco
+
+        mkdir -p {params.flye_dir}
+        mkdir -p {params.ref_dir}
+        mkdir -p {params.integrated_dir}
+
+        # BUSCO for Flye polished assembly
+        busco -i {input.flye_polished} -o {params.flye_dir} -l diptera_odb10 -m genome --cpu {threads}
+        
+        # BUSCO for reference polished assembly  
+        busco -i {input.ref_polished} -o {params.ref_dir} -l diptera_odb10 -m genome --cpu {threads}
+        
+        # BUSCO for integrated assembly
+        busco -i {input.integrated} -o {params.integrated_dir} -l diptera_odb10 -m genome --cpu {threads}
+        '''
+
+# ==============================================================================
+# OPTIONAL: HYBRID POLISHING WITH SHORT READS (if available)
+# ==============================================================================
+
+rule host_prepare_short_reads:
+    input:
+        host_r1 = 'data/short_reads/Dsim_R1.fastq.gz',
+        host_r2 = 'data/short_reads/Dsim_R2.fastq.gz'
+    output:
+        host_trimmed_r1 = 'data/short_reads/{sample}.dsim.trimmed.R1.fastq.gz',
+        host_trimmed_r2 = 'data/short_reads/{sample}.dsim.trimmed.R2.fastq.gz'
+    threads: 8
     resources:
-        mem_mb=10000,
-        runtime=30
+        mem_mb=25000,
+        runtime=120
     shell:
         """
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
@@ -137,85 +315,136 @@ rule wri_prepare_short_reads:
 
         # Create output directory
         mkdir -p data/short_reads/
-        # Simply combine R1 and R2 for wRi without trimming
-        zcat {input.wri_r1} {input.wri_r2} | gzip > {output.wri_trimmed}
+        
+        # Trim and filter short reads with fastp
+        fastp -i {input.host_r1} -I {input.host_r2} \
+              -o {output.host_trimmed_r1} -O {output.host_trimmed_r2} \
+              --thread {threads} --length_required 50 --cut_tail
         """
 
-rule wri_polish:
+rule hybrid_polish_integrated:
     input:
-        wolbachia_assembly = 'data/flye/{sample}/wRi/assembly.fasta',
-        wolbachia_short_reads = 'data/short_reads/{sample}.wri.trimmed.filtered.fastq.gz'
+        integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta',
+        host_r1 = 'data/short_reads/{sample}.dsim.trimmed.R1.fastq.gz',
+        host_r2 = 'data/short_reads/{sample}.dsim.trimmed.R2.fastq.gz'
     output:    
-        wolbachia_polished = 'data/polished/{sample}_wRi_M23.assembly.fasta'
+        final_polished = 'data/final/{sample}_Dsim_final.assembly.fasta'
     params:
-        wolbachia_dir = 'data/polished/{sample}/wRi/'
+        work_dir = 'data/final/{sample}/'
     resources: 
-        mem_mb=50000,
-        runtime=180  # Shorter runtime for smaller genome
-    threads: 16
+        mem_mb=150000,
+        runtime=480  # 8 hours
+    threads: 20
     shell:
         '''
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
         conda activate assembly
         
         # Create output directory
-        mkdir -p {params.wolbachia_dir}
+        mkdir -p {params.work_dir}
         
         # Index assembly for BWA
-        bwa index {input.wolbachia_assembly}
+        bwa index {input.integrated}
         
-        # Align Wolbachia reads to Wolbachia assembly
-        bwa mem -t {threads} {input.wolbachia_assembly} {input.wolbachia_short_reads} | \
+        # Align short reads to integrated assembly
+        bwa mem -t {threads} {input.integrated} {input.host_r1} {input.host_r2} | \
             sambamba view -f bam -S /dev/stdin | \
-            sambamba sort -t {threads} -o {params.wolbachia_dir}/wolbachia_sorted.bam /dev/stdin
+            sambamba sort -t {threads} -o {params.work_dir}/host_sorted.bam /dev/stdin
 
         # Index the sorted BAM
-        sambamba index -t {threads} {params.wolbachia_dir}/wolbachia_sorted.bam
+        sambamba index -t {threads} {params.work_dir}/host_sorted.bam
 
-        # Mark duplicates for Wolbachia
-        sambamba markdup -t {threads} {params.wolbachia_dir}/wolbachia_sorted.bam {params.wolbachia_dir}/wolbachia_dedup.bam
+        # Mark duplicates
+        sambamba markdup -t {threads} {params.work_dir}/host_sorted.bam {params.work_dir}/host_dedup.bam
         
         # Index the deduplicated BAM
-        sambamba index -t {threads} {params.wolbachia_dir}/wolbachia_dedup.bam
+        sambamba index -t {threads} {params.work_dir}/host_dedup.bam
         
-        export _JAVA_OPTIONS="-Xmx32g"
+        export _JAVA_OPTIONS="-Xmx128g"
 
-        # Polish Wolbachia assembly with Pilon
-        pilon --genome {input.wolbachia_assembly} \
-              --bam {params.wolbachia_dir}/wolbachia_dedup.bam \
-              --output {params.wolbachia_dir}/wolbachia_polished \
-              --threads {threads}
+        # Final polish with Pilon
+        pilon --genome {input.integrated} \
+              --bam {params.work_dir}/host_dedup.bam \
+              --output {params.work_dir}/final_polished \
+              --threads {threads} --fix snps,indels,gaps
               
-        # Copy polished assembly to final output location
-        cp {params.wolbachia_dir}/wolbachia_polished.fasta {output.wolbachia_polished}
+        # Copy final assembly 
+        cp {params.work_dir}/final_polished.fasta {output.final_polished}
         '''
 
 # ==============================================================================
-# OPTIONAL: QUALITY ASSESSMENT
+# ASSEMBLY COMPARISON AND VALIDATION
 # ==============================================================================
 
-rule wri_busco:
+rule compare_to_reference:
     input:
-        wolbachia_assembly = 'data/flye/{sample}/wRi/assembly.fasta',
-        wolbachia_polished = 'data/polished/{sample}_wRi_M23.assembly.fasta'
+        integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta',
+        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz'
     output:
-        wolbachia_assembly = '/private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_wRi_merrill_23_assembly/busco/{sample}/wRi/assembly/short_summary.specific.rickettsiales_odb10.txt',
-        wolbachia_polished = '/private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_wRi_merrill_23_assembly/busco/{sample}/wRi/polished/short_summary.specific.rickettsiales_odb10.txt'
+        comparison = 'data/comparison/{sample}_vs_ref_dnadiff.txt'
     params:
-        wolbachia_assembly_dir = '/private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_wRi_merrill_23_assembly/busco/{sample}/wRi/assembly/',
-        wolbachia_polished_dir = '/private/groups/russelllab/jodie/Jacobs_et_al_2026_de_novo_wRi_merrill_23_assembly/busco/{sample}/wRi/polished/'
+        work_dir = 'data/comparison/{sample}/'
     resources: 
-        mem_mb=25000,
-        runtime=120
-    threads: 16  
+        mem_mb=100000,
+        runtime=240  # 4 hours
+    threads: 16
     shell:
-        ''' 
+        '''
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
-        conda activate busco
+        conda activate assembly
+        
+        mkdir -p {params.work_dir}
+        
+        # Decompress reference if needed
+        if [[ {input.reference} == *.gz ]]; then
+            gunzip -c {input.reference} > {params.work_dir}/reference.fasta
+        else
+            cp {input.reference} {params.work_dir}/reference.fasta
+        fi
+        
+        # Compare assemblies with dnadiff
+        dnadiff -p {params.work_dir}/comparison {params.work_dir}/reference.fasta {input.integrated}
+        
+        # Generate summary report
+        echo "Assembly vs Reference Comparison" > {output.comparison}
+        echo "================================" >> {output.comparison}
+        cat {params.work_dir}/comparison.report >> {output.comparison}
+        '''
 
-        mkdir -p {params.wolbachia_assembly_dir}
-        mkdir -p {params.wolbachia_polished_dir}
+# ==============================================================================
+# ALTERNATIVE: RAGTAG SCAFFOLDING (if Quickmerge not available)
+# ==============================================================================
 
-        busco -i {input.wolbachia_assembly} -o {params.wolbachia_assembly_dir} -l rickettsiales_odb10 -m genome --cpu {threads}
-        busco -i {input.wolbachia_polished} -o {params.wolbachia_polished_dir} -l rickettsiales_odb10 -m genome --cpu {threads}
+rule ragtag_scaffold:
+    input:
+        flye_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta',
+        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz'
+    output:
+        scaffolded = 'data/ragtag/{sample}_Dsim_scaffolded.assembly.fasta'
+    params:
+        work_dir = 'data/ragtag/{sample}/',
+        reference_unzipped = 'data/ragtag/{sample}/reference.fasta'
+    resources: 
+        mem_mb=100000,
+        runtime=360  # 6 hours
+    threads: 16
+    shell:
+        '''
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        mkdir -p {params.work_dir}
+        
+        # Decompress reference
+        if [[ {input.reference} == *.gz ]]; then
+            gunzip -c {input.reference} > {params.reference_unzipped}
+        else
+            cp {input.reference} {params.reference_unzipped}
+        fi
+        
+        # Scaffold with RagTag
+        ragtag.py scaffold {params.reference_unzipped} {input.flye_polished} -o {params.work_dir} -t {threads}
+        
+        # Copy final scaffolded assembly
+        cp {params.work_dir}/ragtag.scaffold.fasta {output.scaffolded}
         '''
