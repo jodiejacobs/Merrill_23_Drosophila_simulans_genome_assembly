@@ -24,7 +24,7 @@ rule all:
 
 rule basecalling:
     input:
-        pod5 = '/private/groups/russelllab/jodie/sequencing_data/Dsim_wRi_merrill23/pod5'
+        pod5 = 'data/pod5'
     output:
         bam = 'data/aligned/aligned_basecalled.bam'
     params:
@@ -111,6 +111,7 @@ rule host_flye_assembly:
     params:
         host_dir = 'data/flye/{sample}/Dsim/'
     resources: 
+        slurm_partition='long',
         mem_mb=200000,  # 200GB for large genome
         runtime=1440    # 24 hours for D. simulans assembly
     threads: 24  
@@ -121,71 +122,89 @@ rule host_flye_assembly:
         mkdir -p {params.host_dir}
         flye --nano-hq {input.host_fastq} -t {threads} --out-dir {params.host_dir} --genome-size 140m
         '''
-
-rule reference_based_polish:
+rule host_medaka_polish:
     input:
-        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
+        assembly="data/flye/{sample}/Dsim/assembly.fasta",
+        reads="data/basecalled/{sample}.DsimM23.fastq.gz"
     output:
-        ref_polished = 'data/polished/{sample}_Dsim_ref_polished.fasta'
-    params:
-        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz',
-        work_dir = 'data/polished/{sample}/ref_polish/'
-    resources: 
-        mem_mb=150000,
-        runtime=720  # 12 hours
+        "data/polished/{sample}_Dsim_flye_polished.fasta"
     threads: 20
+    resources:
+        mem_mb=150000,
+        runtime=720,
+        slurm_partition="medium"
     shell:
-        '''
+        """
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
         conda activate assembly
         
-        mkdir -p {params.work_dir}
+        mkdir -p data/polished/{wildcards.sample}/flye_polish/
+        
+        # Map reads to assembly
+        minimap2 -ax map-ont -t {threads} {input.assembly} {input.reads} | \
+            samtools sort -@ {threads} > data/polished/{wildcards.sample}/flye_polish/mapped.bam
+        samtools index data/polished/{wildcards.sample}/flye_polish/mapped.bam
+        
+        # Step 1: Generate features from BAM
+        medaka inference data/polished/{wildcards.sample}/flye_polish/mapped.bam \
+            data/polished/{wildcards.sample}/flye_polish/consensus.hdf \
+            --model r1041_e82_400bps_hac_v4.3.0 --threads {threads}
+        
+        # Step 2: Generate consensus FASTA from features
+        medaka consensus_from_features data/polished/{wildcards.sample}/flye_polish/consensus.hdf \
+            {output}
+        """
+
+rule reference_based_racon_polish:
+    input:
+        reads="data/basecalled/{sample}.DsimM23.fastq.gz"
+    output:
+        "data/polished/{sample}_Dsim_ref_polished.fasta"
+    threads: 20
+    resources:
+        mem_mb=150000,
+        runtime=720,
+        slurm_partition="medium"
+    shell:
+        """
+        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
+        conda activate assembly
+        
+        mkdir -p data/polished/{wildcards.sample}/ref_polish/
         
         # Decompress reference if needed
-        if [[ {params.reference} == *.gz ]]; then
-            gunzip -c {params.reference} > {params.work_dir}/reference.fasta
+        if [[ data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz == *.gz ]]; then
+            gunzip -c data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz > data/polished/{wildcards.sample}/ref_polish/reference.fasta
         else
-            cp {params.reference} {params.work_dir}/reference.fasta
+            cp data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz data/polished/{wildcards.sample}/ref_polish/reference.fasta
         fi
         
         # Map nanopore reads to reference
-        minimap2 -ax map-ont -t {threads} {params.work_dir}/reference.fasta {input.host_fastq} | \
-            samtools sort -@ {threads} > {params.work_dir}/mapped.bam
-        samtools index {params.work_dir}/mapped.bam
+        minimap2 -ax map-ont -t {threads} data/polished/{wildcards.sample}/ref_polish/reference.fasta {input.reads} | \
+            samtools sort -@ {threads} > data/polished/{wildcards.sample}/ref_polish/mapped.bam
+        samtools index data/polished/{wildcards.sample}/ref_polish/mapped.bam
         
-        # Polish with Medaka
-        medaka consensus {params.work_dir}/mapped.bam {output.ref_polished} \
+        # Step 1: Generate features from BAM
+        medaka inference data/polished/{wildcards.sample}/ref_polish/mapped.bam \
+            data/polished/{wildcards.sample}/ref_polish/consensus.hdf \
             --model r1041_e82_400bps_hac_v4.3.0 --threads {threads}
-        '''
-
-rule host_medaka_polish:
+        
+        # Step 2: Generate consensus FASTA from features
+        medaka consensus_from_features data/polished/{wildcards.sample}/ref_polish/consensus.hdf \
+            {output}
+        """
+        
+rule reference_scaffold:
     input:
-        host_assembly = 'data/flye/{sample}/Dsim/assembly.fasta',
-        host_fastq = 'data/basecalled/{sample}.DsimM23.fastq.gz'
+        assembly="data/flye/{sample}/Dsim/assembly.fasta",
+        reference="data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz"
     output:
-        host_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta'
-    params:
-        work_dir = 'data/polished/{sample}/flye_polish/'
-    resources: 
-        mem_mb=150000,
-        runtime=720  # 12 hours
-    threads: 20
+        "data/scaffolded/{sample}_Dsim_scaffolded.fasta"
     shell:
-        '''
-        source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
-        conda activate assembly
-        
-        mkdir -p {params.work_dir}
-        
-        # Map reads to assembly
-        minimap2 -ax map-ont -t {threads} {input.host_assembly} {input.host_fastq} | \
-            samtools sort -@ {threads} > {params.work_dir}/mapped.bam
-        samtools index {params.work_dir}/mapped.bam
-        
-        # Polish with Medaka  
-        medaka consensus {params.work_dir}/mapped.bam {output.host_polished} \
-            --model r1041_e82_400bps_hac_v4.3.0 --threads {threads}
-        '''
+        """
+        ragtag.py scaffold {input.reference} {input.assembly} -o data/scaffolded/{wildcards.sample}_Dsim_ragtag/
+        cp data/scaffolded/{wildcards.sample}_Dsim_ragtag/ragtag.scaffold.fasta {output}
+        """
 
 rule integrate_assemblies:
     input:
