@@ -28,7 +28,7 @@ rule basecalling:
     output:
         bam = 'data/aligned/aligned_basecalled.bam'
     params:
-        genome = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz',
+        genome = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna',
         outdir = 'data/aligned/'
     threads: 25
     resources:
@@ -136,7 +136,7 @@ rule host_medaka_polish:
     shell:
         """
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
-        conda activate assembly
+        conda activate medaka
         
         mkdir -p data/polished/{wildcards.sample}/flye_polish/
         
@@ -168,15 +168,15 @@ rule reference_based_racon_polish:
     shell:
         """
         source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
-        conda activate assembly
+        conda activate medaka
         
         mkdir -p data/polished/{wildcards.sample}/ref_polish/
         
         # Decompress reference if needed
-        if [[ data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz == *.gz ]]; then
-            gunzip -c data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz > data/polished/{wildcards.sample}/ref_polish/reference.fasta
+        if [[ data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna == *.gz ]]; then
+            gunzip -c data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna > data/polished/{wildcards.sample}/ref_polish/reference.fasta
         else
-            cp data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz data/polished/{wildcards.sample}/ref_polish/reference.fasta
+            cp data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna data/polished/{wildcards.sample}/ref_polish/reference.fasta
         fi
         
         # Map nanopore reads to reference
@@ -197,7 +197,7 @@ rule reference_based_racon_polish:
 rule reference_scaffold:
     input:
         assembly="data/flye/{sample}/Dsim/assembly.fasta",
-        reference="data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz"
+        reference="data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna"
     output:
         "data/scaffolded/{sample}_Dsim_scaffolded.fasta"
     shell:
@@ -398,7 +398,7 @@ rule hybrid_polish_integrated:
 rule compare_to_reference:
     input:
         integrated = 'data/integrated/{sample}_Dsim_integrated.assembly.fasta',
-        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz'
+        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna'
     output:
         comparison = 'data/comparison/{sample}_vs_ref_dnadiff.txt'
     params:
@@ -437,7 +437,7 @@ rule compare_to_reference:
 rule ragtag_scaffold:
     input:
         flye_polished = 'data/polished/{sample}_Dsim_flye_polished.fasta',
-        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna.gz'
+        reference = 'data/reference/GCF_016746395.2_Prin_Dsim_3.1_genomic.fna'
     output:
         scaffolded = 'data/ragtag/{sample}_Dsim_scaffolded.assembly.fasta'
     params:
